@@ -16,7 +16,7 @@ jobs:
         outputs:
             release_created: ${{ steps.release.outputs.release_created }}
         steps:
-            - uses: googleapis/release-please-action@v5
+            - uses: googleapis/release-please-action@7987652d64b4581673a76e33ad5e98e3dd56832f # v5.0.0
               id: release
 
     publish:
@@ -27,8 +27,8 @@ jobs:
             contents: read
             id-token: write
         steps:
-            - uses: actions/checkout@v7
-            - uses: actions/setup-node@v7
+            - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v7.2.0
+            - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v7.1.0
               with:
                   node-version: 24
                   registry-url: 'https://registry.npmjs.org'

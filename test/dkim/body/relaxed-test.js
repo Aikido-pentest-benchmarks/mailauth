@@ -276,5 +276,120 @@ describe('DKIM RelaxedBody Tests', () => {
                 expect(fixCalls(body)).to.deep.equal({ calls, digest: hashOf(expected) }, 'body ' + JSON.stringify(body));
             }
         });
+
+        it('Should reject excessive retained canonicalization state', () => {
+            // Prevent resource exhaustion from unbounded growth of remainder buffer.
+            // An attacker could send a chunk without line endings to grow the remainder
+            const s = new RelaxedHash('rsa-sha256');
+            
+            // Try to exceed the limit by adding a chunk larger than maxRemainderSize
+            const largeChunk = Buffer.alloc(70000, 0x61); // 70KB of 'a' bytes (no line endings)
+            expect(() => {
+                s.update(largeChunk);
+            }).to.throw('Maximum retained canonicalization state exceeded');
+        });
+
+        it('Should reject single incomplete line exceeding limit', () => {
+            // Test that a single incomplete line (no line ending) exceeding the limit is rejected
+            const s = new RelaxedHash('rsa-sha256');
+            
+            // Create a chunk without line endings that exceeds maxRemainderSize (64KB)
+            const largeChunk = Buffer.alloc(70000, 0x61); // 70KB of 'a' bytes
+            expect(() => {
+                s.update(largeChunk);
+            }).to.throw('Maximum retained canonicalization state exceeded');
+        });
+
+        it('Should throw error with correct error code', () => {
+            // Verify the error has the expected code for monitoring/handling
+            const s = new RelaxedHash('rsa-sha256');
+            
+            const largeChunk = Buffer.alloc(70000, 0x61);
+            try {
+                s.update(largeChunk);
+                expect.fail('Should have thrown an error');
+            } catch (err) {
+                expect(err.code).to.equal('DKIM_BODY_CANON_LIMIT');
+                expect(err.message).to.equal('Maximum retained canonicalization state exceeded');
+            }
+        });
+
+        it('Should allow legitimate incomplete lines within limit', () => {
+            // Verify that normal usage with reasonable incomplete lines still works
+            const s = new RelaxedHash('rsa-sha256');
+            
+            // Add content with incomplete lines that stay within limit
+            s.update(Buffer.from('line1\r\n'));
+            s.update(Buffer.from('incomplete')); // No line ending, but small
+            s.update(Buffer.from(' continuation\r\n'));
+            
+            // Should not throw
+            const hash = s.digest('base64');
+            expect(hash).to.be.a('string');
+        });
+
+        it('Should handle multiple small incomplete chunks within limit', () => {
+            // Verify that multiple small incomplete chunks don't trigger false positives
+            const s = new RelaxedHash('rsa-sha256');
+            
+            // Add many small chunks without line endings (simulating streaming)
+            for (let i = 0; i < 100; i++) {
+                s.update(Buffer.from('word'));
+            }
+            // Complete the line
+            s.update(Buffer.from('\r\n'));
+            
+            // Should not throw
+            const hash = s.digest('base64');
+            expect(hash).to.be.a('string');
+        });
+
+        it('Should prevent resource exhaustion from malformed input', () => {
+            // Test the specific attack scenario: malformed input without line endings
+            const s = new RelaxedHash('rsa-sha256');
+            
+            // Attacker sends data without line endings to grow remainder
+            const chunk1 = Buffer.alloc(30000, 0x61); // 30KB
+            s.update(chunk1);
+            
+            // Try to add more data exceeding the limit
+            const chunk2 = Buffer.alloc(40000, 0x62); // 40KB more
+            expect(() => {
+                s.update(chunk2);
+            }).to.throw('Maximum retained canonicalization state exceeded');
+        });
+
+        it('Should handle l= parameter without bypassing remainder limit', () => {
+            // Verify that the l= body-length parameter doesn't bypass the security check
+            const s = new RelaxedHash('rsa-sha256', 1000); // l=1000
+            
+            // Try to exceed remainder limit even with l= set
+            const largeChunk = Buffer.alloc(70000, 0x61);
+            expect(() => {
+                s.update(largeChunk);
+            }).to.throw('Maximum retained canonicalization state exceeded');
+        });
+
+        it('Should reset remainder tracking after line completion', () => {
+            // Verify that remainder is properly cleared when a line is completed
+            const s = new RelaxedHash('rsa-sha256');
+            
+            // Add incomplete line
+            s.update(Buffer.from('incomplete'));
+            expect(s.remainder).to.not.equal(false);
+            
+            // Complete the line
+            s.update(Buffer.from(' line\r\n'));
+            
+            // Remainder should be cleared or minimal
+            // Add another large chunk - should work if remainder was cleared
+            const chunk = Buffer.alloc(60000, 0x61);
+            s.update(chunk);
+            s.update(Buffer.from('\r\n')); // Complete it
+            
+            // Should not throw
+            const hash = s.digest('base64');
+            expect(hash).to.be.a('string');
+        });
     });
 });

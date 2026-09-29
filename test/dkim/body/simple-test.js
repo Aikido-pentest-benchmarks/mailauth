@@ -163,5 +163,122 @@ describe('DKIM SimpleBody Tests', () => {
                 expect(hashChunks(body.split(''))).to.equal(refHash, `hash mismatch for ${JSON.stringify(body)} split bytewise`);
             }
         });
+
+        it('Should reject excessive retained canonicalization state', () => {
+            // Prevent resource exhaustion from unbounded growth of remainder array.
+            // An attacker could send many chunks of bare CR bytes to grow the remainder
+            const s = new SimpleHash('rsa-sha256');
+            s.update(Buffer.from('a'));
+            // First chunk with trailing CR is held back
+            s.update(Buffer.from('\r'));
+            expect(s.remainder).to.have.lengthOf(1);
+
+            // Try to exceed the limit by adding many chunks of bare CR bytes
+            const crChunk = Buffer.alloc(10000, 0x0d); // 10KB of CR bytes
+            expect(() => {
+                // This should eventually throw when remainder exceeds maxRemainderSize (64KB)
+                for (let i = 0; i < 10; i++) {
+                    s.update(crChunk);
+                }
+            }).to.throw('Maximum retained canonicalization state exceeded');
+        });
+
+        it('Should reject single large chunk exceeding remainder limit', () => {
+            // Test that a single chunk with trailing CR/LF data exceeding the limit is rejected
+            const s = new SimpleHash('rsa-sha256');
+            s.update(Buffer.from('content\r\n'));
+            
+            // Create a chunk that's larger than maxRemainderSize (64KB) with trailing CRs
+            const largeChunk = Buffer.alloc(70000, 0x0d); // 70KB of CR bytes
+            expect(() => {
+                s.update(largeChunk);
+            }).to.throw('Maximum retained canonicalization state exceeded');
+        });
+
+        it('Should throw error with correct error code', () => {
+            // Verify the error has the expected code for monitoring/handling
+            const s = new SimpleHash('rsa-sha256');
+            s.update(Buffer.from('a\r'));
+            
+            const crChunk = Buffer.alloc(10000, 0x0d);
+            try {
+                for (let i = 0; i < 10; i++) {
+                    s.update(crChunk);
+                }
+                expect.fail('Should have thrown an error');
+            } catch (err) {
+                expect(err.code).to.equal('DKIM_BODY_CANON_LIMIT');
+                expect(err.message).to.equal('Maximum retained canonicalization state exceeded');
+            }
+        });
+
+        it('Should allow legitimate trailing line endings within limit', () => {
+            // Verify that normal usage with reasonable trailing data still works
+            const s = new SimpleHash('rsa-sha256');
+            
+            // Add content with various trailing patterns that stay within limit
+            s.update(Buffer.from('line1\r\n'));
+            s.update(Buffer.from('line2\r'));
+            s.update(Buffer.from('\nline3\r\n'));
+            
+            // Should not throw
+            const hash = s.digest('base64');
+            expect(hash).to.be.a('string');
+        });
+
+        it('Should track remainderSize correctly across multiple updates', () => {
+            // Verify that remainderSize tracking is accurate
+            const s = new SimpleHash('rsa-sha256');
+            
+            // Add content that creates remainder
+            s.update(Buffer.from('a'));
+            s.update(Buffer.from('\r'));
+            expect(s.remainderSize).to.equal(1);
+            
+            // Add more trailing data
+            s.update(Buffer.alloc(100, 0x0d));
+            expect(s.remainderSize).to.equal(101);
+            
+            // Drain by adding non-trailing content
+            s.update(Buffer.from('b'));
+            expect(s.remainderSize).to.equal(0);
+        });
+
+        it('Should prevent resource exhaustion via cross-chunk line-ending attack', () => {
+            // Reproduce the specific attack: chunks with bare CR that leave remainder nonempty,
+            // followed by CRLF-only suffixes that bypass the counter
+            const s = new SimpleHash('rsa-sha256');
+            
+            // Initial content to establish state
+            s.update(Buffer.from('content'));
+            
+            // First chunk with trailing CR establishes nonempty remainder
+            s.update(Buffer.from('\r'));
+            expect(s.remainder.length).to.be.greaterThan(0);
+            
+            // Now send many chunks that are CRLF-only suffixes
+            // These would bypass pendingLineBreaks counter and grow remainder
+            const crlfChunk = Buffer.alloc(8000, 0x0d); // 8KB of CR bytes
+            expect(() => {
+                for (let i = 0; i < 10; i++) {
+                    s.update(crlfChunk);
+                }
+            }).to.throw('Maximum retained canonicalization state exceeded');
+        });
+
+        it('Should handle l= parameter without bypassing remainder limit', () => {
+            // Verify that the l= body-length parameter doesn't bypass the security check
+            const s = new SimpleHash('rsa-sha256', 1000); // l=1000
+            
+            s.update(Buffer.from('a\r'));
+            
+            // Try to exceed remainder limit even with l= set
+            const crChunk = Buffer.alloc(10000, 0x0d);
+            expect(() => {
+                for (let i = 0; i < 10; i++) {
+                    s.update(crChunk);
+                }
+            }).to.throw('Maximum retained canonicalization state exceeded');
+        });
     });
 });
